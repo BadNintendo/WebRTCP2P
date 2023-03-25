@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<title>StickPM.com - Streaming made Easy!</title>
+		<meta content="text/html; charset=UTF-8" http-equiv="content-type">
+		<meta name="keywords" content="chat, room, irc, free, live, community, chatroom, chatline, service, stream, streaming, voice, audio, video, webcam, cam, talk, social, network, html5, video chat"/>
+		<meta name="description" content="StickPM is a free streaming service for all. Browse through the free streams to meet friends or make your own stream. No downloads, no register, no problem. Just be yourself."/>
+		<meta http-equiv="X-UA-Compatible" content="IE=edge, chrome=1"/>
+		<meta name="robots" content="noindex, nofollow"/>
+		<meta http-equiv="pragma" content="no-cache"/>
+		<meta name="revisit-after" content="0 day"/>
+		<link rel="stylesheet" type="text/css" media="all" href="new.css"/>
+		<link rel="apple-touch-icon-precomposed" href="wifi.png"/>
+		<link rel="icon" href="wifi.png"/>
+		<script src="/socket.io/socket.io.js"></script>
+		<link href="https://unpkg.com/tailwindcss@^1.0/dist/tailwind.min.css" rel="stylesheet">
+		<link rel="preconnect" href="https://fonts.gstatic.com">
+		<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500&display=swap" rel="stylesheet">
+		<script src="https://kit.fontawesome.com/9464a703b0.js"></script>
+	<script>
+		var loc = window.location.href+'';
+		if (loc.indexOf('http://')==0) window.location.href = loc.replace('http://','https://');
+		let newpage = '<%= room %>';
+		/** CONFIG **/
+		let USE_AUDIO = true;
+		let USE_VIDEO = true;
+		const DEFAULT_CHANNEL = 'some-global-channel-name';
+		const MUTE_AUDIO_BY_DEFAULT = false;
+
+		const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+		let signaling_socket = null;
+		let local_media_stream = null;
+		let peers = {};
+		let peer_media_elements = {};
+
+		function init(room) {
+		  console.log('Connecting to signaling server');
+		  signaling_socket = io();
+		  removeStartScreen();
+		  addRoomID(room);
+		  signaling_socket.on('connect', () => {
+			console.log('Connected to signaling server');
+			setup_local_media(() => {
+			  join_chat_channel(room, {
+				name: '',
+			  });
+			});
+		  });
+		  signaling_socket.on('disconnect', () => {
+			console.log('Disconnected from signaling server');
+			for (peer_id in peer_media_elements) {
+			  peer_media_elements[peer_id].remove();
+			}
+			for (peer_id in peers) {
+			  peers[peer_id].close();
+			}
+			peers = {};
+			peer_media_elements = {};
+		  });
+		  function join_chat_channel(channel, userdata) {
+			signaling_socket.emit('join', { channel: channel, userdata: userdata });
+		  }
+		  function part_chat_channel(channel) {
+			signaling_socket.emit('part', channel);
+		  }
+		  signaling_socket.on('addPeer', async config => {
+			console.log('Signaling server said to add peer:', config);
+			let peer_id = config.peer_id;
+			if (peer_id in peers) {
+			  console.log(`Already connected to peer ${peer_id}`);
+			  return;
+			}
+			let peer_connection = new RTCPeerConnection(
+			  { iceServers: ICE_SERVERS },
+			  { optional: [{ DtlsSrtpKeyAgreement: true }] }
+			);
+			peers[peer_id] = peer_connection;
+			peer_connection.onicecandidate = event => {
+			  if (event.candidate) {
+				signaling_socket.emit('relayICECandidate', {
+				  peer_id: peer_id,
+				  ice_candidate: {
+					sdpMLineIndex: event.candidate.sdpMLineIndex,
+					candidate: event.candidate.candidate,
+				  },
+				});
+			  }
+			};
+			peer_connection.ontrack = event => {
+			  console.log('onTrack', event);
+			  if (event.track.kind === 'audio' && USE_VIDEO) return;
+			  let remote_media = USE_VIDEO
+				? document.createElement('video')
+				: document.createElement('audio');
+			  remote_media.setAttribute('autoplay', 'true');
+			  remote_media.setAttribute('playsinline', 'true');
+			  if (MUTE_AUDIO_BY_DEFAULT) {
+				remote_media.setAttribute('muted', 'true');
+			  }
+			  remote_media.setAttribute('controls', '')
+			  peer_media_elements[peer_id] = remote_media;;
+			  document.querySelector('#streams').append(remote_media);
+			  attachMediaStream(remote_media, event.streams[0]);
+			};
+			local_media_stream.getTracks().forEach(track => {
+			  peer_connection.addTrack(track, local_media_stream);
+			});
+			if (config.should_create_offer) {
+			  console.log(`Creating RTC offer to ${peer_id}`);
+			  peer_connection.createOffer().then(
+				local_description => {
+				  console.log('Local offer description is:', local_description);
+				  peer_connection.setLocalDescription(local_description).then(() => {
+					signaling_socket.emit('relaySessionDescription', {
+					  peer_id: peer_id,
+					  session_description: local_description,
+					});
+					console.log('Offer setLocalDescription succeeded');
+				  });
+				  //   peer_connection.setLocalDescription(
+				  //     local_description,
+				  //     () => {
+				  //       signaling_socket.emit('relaySessionDescription', {
+				  //         peer_id: peer_id,
+				  //         session_description: local_description,
+				  //       })
+				  //       console.log('Offer setLocalDescription succeeded')
+				  //     },
+				  //     () => {
+				  //       Alert('Offer setLocalDescription failed!')
+				  //     }
+				  //   )
+				},
+				error => {
+				  console.log('Error sending offer:', error);
+				}
+			  );
+			}
+		  });
+		  signaling_socket.on('sessionDescription', config => {
+			console.log('Remote description received:', config);
+			let peer_id = config.peer_id;
+			let peer = peers[peer_id];
+			let remote_description = config.session_description;
+			console.log(config.session_description);
+			let desc = new RTCSessionDescription(remote_description);
+			let stuff = peer.setRemoteDescription(desc).then(
+			  () => {
+				console.log('setRemoteDescription succeeded');
+				if (remote_description.type == 'offer') {
+				  console.log('Creating answer');
+				  peer.createAnswer().then(
+					local_description => {
+					  console.log('Answer description is:', local_description);
+					  peer.setLocalDescription(local_description).then(
+						() => {
+						  signaling_socket.emit('relaySessionDescription', {
+							peer_id: peer_id,
+							session_description: local_description,
+						  });
+						  console.log('Answer setLocalDescription succeeded');
+						},
+						() => {
+						  Alert('Answer setLocalDescription failed!');
+						}
+					  )
+					},
+					error => {
+					  console.log('Error creating answer:', error);
+					  console.log(peer);
+					}
+				  )
+				}
+			  },
+			  error => {
+				console.log('setRemoteDescription error:', error);
+			  }
+			);
+			console.log('Description Object:', desc);
+		  });
+		  signaling_socket.on('iceCandidate', config => {
+			let peer = peers[config.peer_id];
+			let ice_candidate = config.ice_candidate;
+			peer.addIceCandidate(new RTCIceCandidate(ice_candidate));
+		  });
+		  signaling_socket.on('removePeer', config => {
+			console.log('Signaling server said to remove peer:', config);
+			let peer_id = config.peer_id;
+			if (peer_id in peer_media_elements) {
+			  peer_media_elements[peer_id].remove();
+			}
+			if (peer_id in peers) {
+			  peers[peer_id].close();
+			}
+			delete peers[peer_id];
+			delete peer_media_elements[config.peer_id];
+		  });
+		}
+		function setup_local_media(callback, errorback) {
+		  if (local_media_stream != null) {
+			if (callback) callback();
+			return;
+		  }
+		  console.log('Requesting access to local audio / video inputs');
+		  attachMediaStream = (element, stream) => {
+			if (typeof element.srcObject == 'object') {
+			  element.srcObject = stream;
+			} else {
+			  element.src = URL.createObjectURL(stream);
+			}
+		  };
+		  navigator.mediaDevices
+			.getUserMedia({ audio: USE_AUDIO, video: USE_VIDEO })
+			.then(
+			  stream => {
+				console.log('Access granted to audio/video');
+				local_media_stream = stream;
+				let local_media = USE_VIDEO
+				  ? document.createElement('video')
+				  : document.createElement('audio');
+				local_media.setAttribute('autoplay', 'true');
+				local_media.setAttribute('playsinline', 'true');
+				local_media.muted = true;
+				local_media.setAttribute('controls', '');
+				document.querySelector('#streams').append(local_media);
+				attachMediaStream(local_media, stream);
+
+				if (callback) callback();
+			  },
+			  () => {
+				console.log('Access denied for audio/video');
+				alert('You chose not to provide access to the camera/microphone, demo will not work.');
+				if (errorback) errorback();
+			  }
+			);
+		}
+		function removeStartScreen() {
+			document.getElementById('showHome').style.display = 'none';
+		}
+
+		function getRoomID() {
+			let room = document.getElementById('room').value;
+			return room;
+		}
+		function addRoomID(ID) {
+			let roomID = document.createElement('h1');
+			roomID.innerHTML = `Room ID: ${ID}`;
+			roomID.setAttribute('id', 'room-id');
+			document.querySelector('#streams').append(roomID);
+			//document.querySelector('body').append(roomID);
+		}
+		let onloaded = (room) => {
+			init(room);
+		};
+		let sendroom = () => {
+			window.location = '/room/' + getRoomID();
+			return false;
+		};
+	</script>
+	<style>
+        html, body { 
+            --tw-bg-opacity: 1;
+            background-color: rgba(17, 24, 39, var(--tw-bg-opacity));
+            font-family: 'Montserrat', sans-serif;
+        }
+        #room-id {
+            display: block;
+            width: 100%;
+            color: white;
+            margin-top: 2rem;
+            text-align: center;
+            font-size: 1.25rem;
+        }
+        video {
+            width:  320px;
+            height:  240px;
+            border:  1px solid black;
+            border-radius: 12px;
+            display: inline-block;
+            margin-left: 2rem;
+            margin-top: 2rem;
+        }
+    </style>
+</head>
+<body class="innerGlow">
+	<div id="showHome">
+		<div class="wrapper">
+			<header class="page-header">
+				<nav>
+					<h2 class="logo">&nbsp;</h2>
+					<ul>
+						<li class="home-links" id="openlogin">Log in (<i class="fas fa-question"></i>)</li>
+					</ul>
+					<button class="ch-register home-color" id="register">Register <i class="far fa-address-card"></i></button>
+				</nav>
+			</header>
+			<main class="page-login" id="mainlogin">
+				<div>
+					<form action="" method="post">
+					  <div class="container">
+						<h1>Login</h1>
+						<hr>
+						
+						<label for="usn"><b>Username</b></label>
+						<input type="text" placeholder="Enter Username" name="usn" id="usn" required><br />
+						
+						<label for="psw"><b>Password</b></label>
+						<input type="password" placeholder="Enter Password" name="psw" id="psw" required><br />
+						<input type="hidden" name="typeof" id="typeof" value="login">
+						<button type="submit" class="loginbtn">Login</button>
+					  </div>
+
+					  <div class="container signin">
+						<p>Already have an account? <a href="#">Sign in</a>.</p>
+					  </div>
+					</form>
+				</div>
+			</main>
+			<main class="page-register" id="mainregister">
+				<div>
+					<form action="/" method="post">
+					  <div class="container">
+						<h1>Register</h1>
+						<p>Please fill in this form to create an account.</p>
+						<hr>
+
+						<label for="email"><b>Email</b></label>
+						<input type="text" placeholder="Enter Email" name="email" id="email" required><br />
+
+						<label for="usn"><b>Username</b></label>
+						<input type="text" placeholder="Enter Username" name="usn" id="usn" required><br />
+
+						<label for="psw"><b>Password</b></label>
+						<input type="password" placeholder="Enter Password" name="psw" id="psw" required><br />
+
+						<label for="pswrepeat"><b>Repeat Password</b></label>
+						<input type="password" placeholder="Repeat Password" name="pswrepeat" id="pswrepeat" required><br />
+						<hr>
+						<input type="hidden" name="typeof" id="typeof" value="register">
+						<p>By creating an account you agree to our <a href="/terms">Terms & Privacy</a>.</p>
+						<button type="submit" class="registerbtn">Register</button>
+					  </div>
+
+					  <div class="container signin">
+						<p>Already have an account? <a href="#">Sign in</a>.</p>
+					  </div>
+					</form>
+				</div>
+			</main>
+			<main class="page-main">
+				<div>
+					<h1>Streaming made simple. The concepts simple.</h1>
+					<div id="join-form" class="p-10 w-96 rounded flex justify-center items-center flex-col shadow-md">
+						<p class="float-left w-full pb-2">Enter Room ID</p>
+						<input type="text" id="room" style="color: #000;" class="mb-5 p-3 w-full focus:border-blue-700 rounded border-2 outline-none" autocomplete="off" placeholder="Room ID" required>
+						<button class="w-full bg-blue-600 hover:bg-blue-900 text-white font-bold p-2 rounded w-80" id="join"><span>Join Room</span></button>
+					</div>
+				</div>
+			</main>
+			<footer class="page-footer">
+				<small><i class="far fa-copyright home-color"></i> StickPM.com 2020-2023. All rights reserved.</small>
+				<ul>
+					<li>
+						<a href="" target="_blank" title="Twitter">
+							<i class="fab fa-twitter"></i>
+						</a>
+					</li>
+					<li>
+						<a href="" target="_blank" title="Instagram">
+							<i class="fab fa-instagram"></i>
+						</a>
+					</li>
+				</ul>
+			</footer>
+		</div>
+	</div>
+	<div id="streams">
+	</div>
+	<div class="wrapped" style="display: none">
+	
+		<link rel="stylesheet" type="text/css" media="all" href="../new.css"/>
+				<div class="left-content StickPM-font">
+					<div id="live-main-menu" class="main-menu themefont">
+						<div id="testing" class="menu-header">
+							<div onclick="removeClass(getid('ch_messages'),'opened'); removeClass(getid('ch_viewers'),'opened'); removeClass(getid('ch_nicknames'),'opened'); addClass(getid('ch_nicknames'),'opened');" id="ch-1-tab" class="tab-1 themehover" title="Users">
+								<div id="alertbubble1" class="alert-bubble color">0</div>
+								&nbsp;
+							</div>
+							<div onclick="removeClass(getid('ch_nicknames'),'opened'); removeClass(getid('ch_messages'),'opened'); removeClass(getid('ch_viewers'),'opened'); addClass(getid('ch_viewers'),'opened');" id="ch-2-tab" class="tab-2 themehover" title="Viewers">
+								<div id="alertbubble2" class="alert-bubble color">0</div>
+								&nbsp;
+							</div>
+							<div onclick="removeClass(getid('ch_viewers'),'opened'); removeClass(getid('ch_messages'),'opened'); addClass(getid('ch_messages'),'opened');" id="ch-3-tab" class="tab-3 themehover" title="PMs">
+								<div id="alertbubble3" class="alert-bubble">0</div>
+								&nbsp;
+							</div>
+							<div class="tab-4 themehover" title="Sort List">&nbsp;</div>
+							<div onclick="removeClass(getid('ch_nicknames'),'opened'); removeClass(getid('ch_search'),'closed'); removeClass(getid('ch_search'),'opened'); addClass(getid('ch_search'),'opened');" class="tab-5 themehover" title="Search List">&nbsp;</div>
+						</div>
+						<div id="ch_search" class="menu-searchs closed">
+							<div class="switch" title="Close Search" onclick="removeClass(getid('ch_search'),'opened'); addClass(getid('ch_search'),'closed'); ">&nbsp;</div>
+							<input id="search-hidden" type="text" style="display: none" /></input>
+							<div id="search-input" class="ch-search-input" contenteditable="true" placeholder="Search List..." spellcheck="true"></div>
+						</div>
+						<div id="ch_messages" class="menu-messages">
+							<!--
+							<div class="menu-nickname" style="counter-increment: tab3;">
+								<div class="mn-gender male" title="Male">&nbsp;</div>
+								<div class="mn-holder font themefont">Demo</div>
+								<div class="mn-controls">
+									<div class="block" title="Block User">&nbsp;</div>
+									<div class="live streaming" title="Live Stream">
+										<div class="private" title="Private Stream">&nbsp;</div>
+									</div>
+								</div>
+							</div>
+							-->
+						</div>
+						<div id="ch_viewers" class="menu-viewers">
+							<!--
+							<div class="menu-nickname" style="counter-increment: tab2;">
+								<div class="mn-gender male" title="Male">&nbsp;</div>
+								<div class="mn-holder font themefont">Demo</div>
+								<div class="mn-controls">
+									<div class="block" title="Block User">&nbsp;</div>
+									<div class="live streaming" title="Live Stream">
+										<div class="private" title="Private Stream">&nbsp;</div>
+									</div>
+								</div>
+							</div>
+							<div class="menu-nickname" style="counter-increment: tab2;">
+								<div class="mn-gender male" title="Male">&nbsp;</div>
+								<div class="mn-holder font themefont">Demo</div>
+								<div class="mn-controls">
+									<div class="block" title="Block User">&nbsp;</div>
+									<div class="live streaming" title="Live Stream">
+										<div class="private" title="Private Stream">&nbsp;</div>
+									</div>
+								</div>
+							</div>
+							-->
+						</div>
+						<div id="ch_nicknames" class="menu-nicknames">
+							<!--
+							<div class="menu-nickname" style="counter-increment: tab1;">
+								<div class="mn-gender male" title="Male">&nbsp;</div>
+								<div class="mn-holder font themefont">Demo</div>
+								<div class="mn-controls">
+									<div class="block" title="Block User">&nbsp;</div>
+									<div class="live streaming" title="Live Stream">
+										<div class="private" title="Private Stream">&nbsp;</div>
+									</div>
+								</div>
+							</div>
+							<div class="menu-nickname">
+								<div class="mn-gender female" title="Female">&nbsp;</div>
+								<div class="mn-holder font themefont">Demo</div>
+								<div class="mn-controls">
+									<div class="block" title="Block User">&nbsp;</div>
+									<div class="live streaming" title="Live Stream">&nbsp;</div>
+								</div>
+							</div>
+							<div class="menu-nickname">
+								<div class="mn-gender shemale" title="Shemale">&nbsp;</div>
+								<div class="mn-holder font themefont">Demo</div>
+								<div class="mn-controls">
+									<div class="block" title="Block User">&nbsp;</div>
+									<div class="live streaming" title="Live Stream">&nbsp;</div>
+								</div>
+							</div>
+							<div class="menu-nickname">
+								<div class="mn-gender couple" title="Couple">&nbsp;</div>
+								<div class="mn-holder font themefont">Demo</div>
+								<div class="mn-controls">
+									<div class="block" title="Block User">&nbsp;</div>
+									<div class="live" title="Not Streaming">&nbsp;</div>
+								</div>
+							</div>
+							-->
+						</div>
+					</div>
+				</div>
+				<div id="chat-content" class="chat-content">
+					<div class="chat-streams">
+						<div id="live-streams" class="activestreams StickPM-font">
+							
+						</div>
+					</div>
+					<div class="chat-header StickPM-font">
+						<div class="chat-pinned theme">
+							<div class="pinned-timestamp" title="00:00 PM">00:00 PM</div>
+							Pinned
+						</div>
+						<div class="chat-pinned-text">Welcome to the Lobby. Type !help for more info.</div>
+					</div>
+					<div id="ch_chatbox" class="chat-relay themefont">
+						
+					</div>
+					<div class="chat-input-area StickPM-font">
+						<div class="chat-input-container">
+							<div class="chat-input">
+								<div id="emoji" style="display: none"></div>
+								<input id="input-hidden" type="text" style="display: none" /></input>
+								<div id="input" class="ch-input" contenteditable="true" placeholder=" Start Chatting..." tabindex="0" spellcheck="true"></div>
+								<div id="send-extra" class="side themehover">
+									<div class="switch" title="Open Extra" onclick="if(this.title=='Close Extra') { this.title='Open Extra';  removeClass(getid('send-extra'),'extra'); } else { this.title='Close Extra'; addClass(getid('send-extra'),'extra'); }">&nbsp;</div>
+									<div class="color">
+										<div class="color-box" style="background-color: red" 		title="Red - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: darkred" 	title="Dark Red - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: black" 		title="Black - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: darkgrey" 	title="Dark Grey - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: grey" 		title="Grey - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: lightgrey" 	title="Light Grey - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: lightgreen" title="Light Green - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: green" 		title="Green - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: darkgreen" 	title="Dark Green - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: deeppink" 	title="Deep Pink - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: pink" 		title="Pink - Font Color">&nbsp;</div>
+										<div class="color-box" style="background-color: purple" 	title="Purple - Font Color">&nbsp;</div>
+									</div>
+									<div id="StickPM_send" class="send">Send</div>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+	</div>
+	<script>
+	if(newpage != 'default') onloaded(newpage);
+	else {	
+		document.querySelector('#join').addEventListener('click', sendroom);
+		document.getElementById('room').focus();
+		document.getElementById('room').select();
+	}
+	</script>
+</body>
+</html>

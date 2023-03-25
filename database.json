@@ -1,0 +1,15 @@
+{
+    "admin": {
+        "name": "admin",
+        "email": "StickPM@gmail.com",
+        "pass": "stickpm",
+        "ip": "127.0.0.1",
+        "type": "account"
+    },
+    "qwiz": {
+        "email": "elite_qwiz@msn.com",
+        "pass": "41c5f15fd5442c804df7a157417fd7e0",
+        "ip": "127.0.0.1",
+        "type": "account"
+    }
+}
