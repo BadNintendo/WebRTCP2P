@@ -4,7 +4,7 @@ Centos OS version 7 prefeered. WebRTC P2P Socket.IO Chat based on a idea I had.
 
 Step 1.
 
-cd WebRTCP2P
+cd WebRTCP2P \n
 sudo npm install
 
 if any issues remove package lockfile and then the package from package.json.
